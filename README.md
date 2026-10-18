@@ -23,14 +23,13 @@ Client → FastAPI API → RabbitMQ → inventory / payment / shipping / notify 
                 ↘ Redis (idempotency)
 ```
 
-## Quick start (Phase 0)
+## Quick start
 
 ```bash
 cp .env.example .env
 docker compose up --build
+docker compose exec api python -m scripts.seed
 ```
-
-Then open:
 
 | Service | URL |
 |---------|-----|
@@ -38,17 +37,20 @@ Then open:
 | Health | http://localhost:8000/health |
 | RabbitMQ Management | http://localhost:15672 (guest / guest) |
 
-Expected health response:
+### Phase 1 smoke test
 
-```json
-{
-  "status": "ok",
-  "phase": 0,
-  "checks": { "postgres": true, "redis": true, "rabbitmq": true }
-}
+```bash
+curl -s http://localhost:8000/health | jq
+
+curl -s -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_email":"learner@example.com","items":[{"sku":"SKU-TEE-BLK","quantity":2}]}' | jq
+
+# Watch the consumer ack the message:
+docker compose logs -f worker-inventory
 ```
 
-Workers log a stub message and wait — real consumers start in Phase 1.
+In RabbitMQ UI → Queues → `q.inventory`: Ready should go to 0 after the worker acks.
 
 ## Repo layout
 

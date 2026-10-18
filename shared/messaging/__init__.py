@@ -1,1 +1,1 @@
-"""RabbitMQ helpers — filled in from Phase 1 onward."""
+"""RabbitMQ helpers (connection, topology, publisher)."""
