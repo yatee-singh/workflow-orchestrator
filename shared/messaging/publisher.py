@@ -1,7 +1,4 @@
-"""Publish helpers.
-
-Phase 1: fire-and-forget publish (publisher confirms land in Phase 3).
-"""
+"""Publish helpers for all exchange types."""
 
 from __future__ import annotations
 
@@ -45,6 +42,7 @@ async def publish_event(
     order_id: str | None = None,
     correlation_id: str | None = None,
     exchange_name: str = EXCHANGE_DIRECT,
+    headers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = build_envelope(
         event_type,
@@ -56,18 +54,22 @@ async def publish_event(
     body = json.dumps(envelope).encode()
     message = aio_pika.Message(
         body=body,
-        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,  # survive broker restart
+        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
         content_type="application/json",
         correlation_id=envelope["correlation_id"],
         message_id=envelope["event_id"],
         type=event_type,
+        headers=headers or {},
     )
+    # Fanout ignores routing_key; headers exchange ignores it too — pass "" for those.
     await exchange.publish(message, routing_key=routing_key)
     logger.info(
-        "Published %s rk=%s order_id=%s event_id=%s",
+        "Published %s exchange=%s rk=%s order_id=%s event_id=%s headers=%s",
         event_type,
+        exchange_name,
         routing_key,
         order_id,
         envelope["event_id"],
+        headers or {},
     )
     return envelope

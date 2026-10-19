@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from api.routes import orders
 from shared.config import get_settings
 from shared.db import Base, check_db, engine
+from shared.db_migrate import apply_schema_patches
 from shared.messaging.connection import close_connection, get_channel, get_connection
 from shared.messaging.topology import declare_topology
 from shared.redis_client import check_redis, close_redis
@@ -25,9 +26,10 @@ async def check_rabbitmq() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("OrderFlow API starting (Phase 1 — core messaging)")
+    logger.info("OrderFlow API starting (Phase 2 — routing)")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await apply_schema_patches(engine)
 
     connection = await get_connection()
     channel = await get_channel()
@@ -44,8 +46,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OrderFlow",
-    description="Learn RabbitMQ via order fulfillment — Phase 1: work queue + manual ack",
-    version="0.1.0",
+    description="Learn RabbitMQ via order fulfillment — Phase 2: fanout/direct/topic/headers",
+    version="0.2.0",
     lifespan=lifespan,
 )
 app.include_router(orders.router)
@@ -53,14 +55,13 @@ app.include_router(orders.router)
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Report connectivity to Postgres, Redis, and RabbitMQ."""
     db_ok = await check_db()
     redis_ok = await check_redis()
     rmq_ok = await check_rabbitmq()
     healthy = db_ok and redis_ok and rmq_ok
     return {
         "status": "ok" if healthy else "degraded",
-        "phase": 1,
+        "phase": 2,
         "checks": {
             "postgres": db_ok,
             "redis": redis_ok,
@@ -75,5 +76,5 @@ async def root() -> dict[str, str]:
         "app": get_settings().app_name,
         "docs": "/docs",
         "health": "/health",
-        "phase": "1 — core messaging (work queue)",
+        "phase": "2 — routing (fanout/direct/topic/headers)",
     }

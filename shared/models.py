@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,7 +15,9 @@ class OrderStatus(str, enum.Enum):
     pending = "pending"
     reserved = "reserved"
     reservation_failed = "reservation_failed"
-    # later phases: paid, shipped, cancelled, ...
+    paid = "paid"
+    payment_failed = "payment_failed"
+    shipped = "shipped"
 
 
 class Order(Base):
@@ -24,12 +26,14 @@ class Order(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[OrderStatus] = mapped_column(
-        Enum(OrderStatus, name="order_status"),
+        Enum(OrderStatus, name="order_status", native_enum=True),
         default=OrderStatus.pending,
         nullable=False,
     )
     total_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_vip: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    region: Mapped[str] = mapped_column(String(8), nullable=False, default="us")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -59,4 +63,3 @@ class InventoryItem(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     quantity_available: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     unit_price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
-    # reserved for later: quantity_reserved

@@ -118,5 +118,16 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  worker-audit:
+    build: .
+    command: python -m workers.audit
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
 volumes:
   postgres_data:

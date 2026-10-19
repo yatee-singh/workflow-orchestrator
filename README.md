@@ -37,20 +37,25 @@ docker compose exec api python -m scripts.seed
 | Health | http://localhost:8000/health |
 | RabbitMQ Management | http://localhost:15672 (guest / guest) |
 
-### Phase 1 smoke test
+### Phase 2 smoke test (routing)
 
 ```bash
-curl -s http://localhost:8000/health | jq
-
+# Happy path → status ends as shipped
 curl -s -X POST http://localhost:8000/orders \
   -H 'Content-Type: application/json' \
-  -d '{"customer_email":"learner@example.com","items":[{"sku":"SKU-TEE-BLK","quantity":2}]}' | jq
+  -d '{"customer_email":"learner@example.com","items":[{"sku":"SKU-TEE-BLK","quantity":1}]}' | jq
 
-# Watch the consumer ack the message:
-docker compose logs -f worker-inventory
+# VIP + EU → also triggers headers-based notify alert
+curl -s -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_email":"vip@example.com","items":[{"sku":"SKU-HAT-RED","quantity":1}],"is_vip":true,"region":"eu"}' | jq
+
+docker compose logs -f \
+  worker-inventory worker-payment worker-shipping \
+  worker-notify worker-analytics worker-audit
 ```
 
-In RabbitMQ UI → Queues → `q.inventory`: Ready should go to 0 after the worker acks.
+In RabbitMQ UI → **Exchanges**: inspect `orders.fanout`, `orders.direct`, `orders.topic`, `orders.headers`.
 
 ## Repo layout
 

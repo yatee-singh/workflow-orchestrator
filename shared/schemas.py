@@ -16,6 +16,8 @@ class OrderItemIn(BaseModel):
 class CreateOrderRequest(BaseModel):
     customer_email: EmailStr
     items: list[OrderItemIn] = Field(min_length=1)
+    is_vip: bool = False
+    region: str = Field(default="us", min_length=2, max_length=8)
 
 
 class OrderItemOut(BaseModel):
@@ -32,6 +34,8 @@ class OrderOut(BaseModel):
     status: OrderStatus
     total_cents: int
     correlation_id: str
+    is_vip: bool
+    region: str
     created_at: datetime
     items: list[OrderItemOut]
 
