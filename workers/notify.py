@@ -35,7 +35,12 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
     if event_type == "payment.succeeded":
         logger.info("EMAIL to %s: payment received for order %s", email, order_id)
     elif event_type == "payment.failed":
-        logger.info("EMAIL to %s: payment failed for order %s", email, order_id)
+        logger.info(
+            "EMAIL to %s: payment FAILED for order %s reason=%s",
+            email,
+            order_id,
+            payload.get("reason"),
+        )
     elif event_type == "shipment.created":
         logger.info(
             "EMAIL+SMS to %s: shipped order %s tracking=%s",

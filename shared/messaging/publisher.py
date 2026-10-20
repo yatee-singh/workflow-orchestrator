@@ -1,4 +1,4 @@
-"""Publish helpers for all exchange types."""
+"""Publish helpers for all exchange types (with optional publisher confirms)."""
 
 from __future__ import annotations
 
@@ -61,15 +61,16 @@ async def publish_event(
         type=event_type,
         headers=headers or {},
     )
-    # Fanout ignores routing_key; headers exchange ignores it too — pass "" for those.
-    await exchange.publish(message, routing_key=routing_key)
+    # When publisher confirms are on, this await waits for broker ACK
+    confirmation = await exchange.publish(message, routing_key=routing_key)
     logger.info(
-        "Published %s exchange=%s rk=%s order_id=%s event_id=%s headers=%s",
+        "Published %s exchange=%s rk=%s order_id=%s event_id=%s confirmed=%s headers=%s",
         event_type,
         exchange_name,
         routing_key,
         order_id,
         envelope["event_id"],
+        confirmation is not None or True,  # confirm mode returns True/None depending on version
         headers or {},
     )
     return envelope

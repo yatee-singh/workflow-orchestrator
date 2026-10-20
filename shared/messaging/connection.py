@@ -1,7 +1,7 @@
 """RabbitMQ connection helpers.
 
 Concept: one *connection* per process, reuse a channel for publishes.
-aio-pika's connect_robust reconnects automatically if the broker restarts.
+Publisher confirms (Phase 3): broker ACKs each publish so we know it was persisted.
 """
 
 from __future__ import annotations
@@ -28,12 +28,28 @@ async def get_connection() -> AbstractRobustConnection:
     return _connection
 
 
-async def get_channel() -> AbstractChannel:
-    """Reuse one channel per process (workers publish on the same channel they consume)."""
+async def get_channel(*, publisher_confirms: bool = False) -> AbstractChannel:
+    """Reuse one channel per process.
+
+    Set publisher_confirms=True on the API (and any critical producer) so
+    `exchange.publish(...)` waits until the broker confirms the message.
+    """
     global _channel
     if _channel is None or _channel.is_closed:
         connection = await get_connection()
         _channel = await connection.channel()
+        if publisher_confirms:
+            # aio-pika / aiormq: enable confirm mode on this channel
+            confirm = getattr(_channel, "set_confirm_delivery", None) or getattr(
+                _channel, "confirm_delivery", None
+            )
+            if confirm is not None:
+                result = confirm()
+                if hasattr(result, "__await__"):
+                    await result  # type: ignore[misc]
+                logger.info("Publisher confirms ENABLED on channel")
+            else:
+                logger.warning("Publisher confirms API not found — publishes are unconfirmed")
     return _channel
 
 

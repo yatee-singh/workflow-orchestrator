@@ -66,6 +66,7 @@ services:
       postgres:
         condition: service_healthy
 
+  # Scale for competing consumers: docker compose up -d --scale worker-payment=2
   worker-payment:
     build: .
     command: python -m workers.payment
@@ -80,8 +81,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    deploy:
-      replicas: 1
 
   worker-shipping:
     build: .

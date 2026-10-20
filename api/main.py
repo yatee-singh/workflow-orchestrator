@@ -26,13 +26,14 @@ async def check_rabbitmq() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("OrderFlow API starting (Phase 2 — routing)")
+    logger.info("OrderFlow API starting (Phase 3 — reliability)")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await apply_schema_patches(engine)
 
     connection = await get_connection()
-    channel = await get_channel()
+    # Publisher confirms: await publish until broker ACKs
+    channel = await get_channel(publisher_confirms=True)
     await declare_topology(channel)
     app.state.rmq_connection = connection
     app.state.rmq_channel = channel
@@ -46,8 +47,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OrderFlow",
-    description="Learn RabbitMQ via order fulfillment — Phase 2: fanout/direct/topic/headers",
-    version="0.2.0",
+    description="Learn RabbitMQ — Phase 3: confirms, retries, DLQ, idempotency",
+    version="0.3.0",
     lifespan=lifespan,
 )
 app.include_router(orders.router)
@@ -61,7 +62,7 @@ async def health() -> dict[str, Any]:
     healthy = db_ok and redis_ok and rmq_ok
     return {
         "status": "ok" if healthy else "degraded",
-        "phase": 2,
+        "phase": 3,
         "checks": {
             "postgres": db_ok,
             "redis": redis_ok,
@@ -76,5 +77,5 @@ async def root() -> dict[str, str]:
         "app": get_settings().app_name,
         "docs": "/docs",
         "health": "/health",
-        "phase": "2 — routing (fanout/direct/topic/headers)",
+        "phase": "3 — reliability (confirms/retries/DLQ/idempotency)",
     }

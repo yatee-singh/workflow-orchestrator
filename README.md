@@ -8,7 +8,7 @@ Monorepo layout: one API process + separate worker processes, all talking throug
 
 | Phase | What you learn |
 |------|----------------|
-| **0 — Scaffold** (you are here) | Process layout, Docker Compose, health checks for broker/DB/cache |
+| **0 — Scaffold** | Process layout, Docker Compose, health checks for broker/DB/cache |
 | **1 — Core** | Producers/consumers, queues, connections vs channels, manual ack, prefetch |
 | **2 — Routing** | Fanout, direct, topic, headers exchanges + bindings |
 | **3 — Reliability** | Durable queues, persistent messages, publisher confirms, retries, DLQ, idempotency |
@@ -37,25 +37,32 @@ docker compose exec api python -m scripts.seed
 | Health | http://localhost:8000/health |
 | RabbitMQ Management | http://localhost:15672 (guest / guest) |
 
-### Phase 2 smoke test (routing)
+### Phase 3 smoke test (reliability)
+
+Queue args changed — **stop app containers first**, then recreate the broker (avoids old workers re-declaring queues without DLX):
 
 ```bash
-# Happy path → status ends as shipped
-curl -s -X POST http://localhost:8000/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"customer_email":"learner@example.com","items":[{"sku":"SKU-TEE-BLK","quantity":1}]}' | jq
-
-# VIP + EU → also triggers headers-based notify alert
-curl -s -X POST http://localhost:8000/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"customer_email":"vip@example.com","items":[{"sku":"SKU-HAT-RED","quantity":1}],"is_vip":true,"region":"eu"}' | jq
-
-docker compose logs -f \
-  worker-inventory worker-payment worker-shipping \
+docker compose stop api worker-inventory worker-payment worker-shipping \
   worker-notify worker-analytics worker-audit
+docker compose up -d --force-recreate rabbitmq
+docker compose up -d --scale worker-payment=2 api worker-inventory worker-payment \
+  worker-shipping worker-notify worker-analytics worker-audit
 ```
 
-In RabbitMQ UI → **Exchanges**: inspect `orders.fanout`, `orders.direct`, `orders.topic`, `orders.headers`.
+```bash
+# Place several orders; with PAYMENT_FAIL_RATE=0.35 some will retry / DLQ
+for i in 1 2 3 4 5; do
+  curl -s -X POST http://localhost:8000/orders \
+    -H 'Content-Type: application/json' \
+    -d "{\"customer_email\":\"u$i@example.com\",\"items\":[{\"sku\":\"SKU-TEE-BLK\",\"quantity\":1}]}" \
+    | jq -c '{id:.order.id,status:.order.status}'
+done
+
+docker compose logs -f worker-payment worker-notify
+```
+
+Watch for: `Scheduled retry`, competing `[hostname]` lines, `Dead-lettered`, `payment FAILED`.
+In UI: Queues → `q.delay.1000` / `q.dlq`.
 
 ## Repo layout
 

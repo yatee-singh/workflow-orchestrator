@@ -1,9 +1,19 @@
-"""Payment worker — consumes direct `payment.charge`, emits topic payment.* events."""
+"""Payment worker — flaky gateway, retries via delay queues, Redis idempotency, DLQ.
+
+Phase 3 concepts:
+- Competing consumers (run 2 replicas) + prefetch=1
+- Simulated payment failures (PAYMENT_FAIL_RATE)
+- Retry with exponential-ish backoff (1s → 5s → 25s) via TTL+DLX
+- After max retries → DLQ + payment.failed event
+- Redis idempotency so a successful charge is never repeated
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import random
 from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
@@ -11,11 +21,14 @@ from sqlalchemy import select
 
 from shared.config import get_settings
 from shared.db import SessionLocal
+from shared.idempotency import already_done, mark_done, payment_done_key
 from shared.messaging.connection import get_channel
 from shared.messaging.publisher import publish_event
+from shared.messaging.retry import max_retries, publish_to_dlq, schedule_retry
 from shared.messaging.topology import (
     EXCHANGE_TOPIC,
     QUEUE_PAYMENT,
+    RK_PAYMENT_FAILED,
     RK_PAYMENT_SUCCEEDED,
 )
 from shared.models import Order, OrderStatus
@@ -24,8 +37,25 @@ from workers.base import run_queue_worker
 logging.basicConfig(level=get_settings().log_level)
 logger = logging.getLogger("worker.payment")
 
+WORKER_ID = os.environ.get("HOSTNAME", "payment-worker")
 
-async def handle(body: dict[str, Any], _message: AbstractIncomingMessage) -> None:
+
+class TransientPaymentError(Exception):
+    """Simulated gateway blip — safe to retry."""
+
+
+async def _simulate_charge(order_id: str, total_cents: int) -> None:
+    settings = get_settings()
+    # Tiny processing delay so competing consumers are easier to observe
+    await asyncio.sleep(0.15)
+    if random.random() < settings.payment_fail_rate:
+        raise TransientPaymentError(
+            f"simulated gateway timeout (fail_rate={settings.payment_fail_rate})"
+        )
+    logger.info("[%s] gateway OK order=%s amount=%s", WORKER_ID, order_id, total_cents)
+
+
+async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None:
     if body.get("type") != "payment.charge":
         logger.warning("Ignoring %s", body.get("type"))
         return
@@ -33,25 +63,82 @@ async def handle(body: dict[str, Any], _message: AbstractIncomingMessage) -> Non
     payload = body["payload"]
     order_id = payload["order_id"]
     correlation_id = body["correlation_id"]
+    event_id = body.get("event_id", "")
+    retry_hdr = (message.headers or {}).get("x-retry-count", 0)
+
+    logger.info(
+        "[%s] charging order=%s retry=%s event=%s",
+        WORKER_ID,
+        order_id,
+        retry_hdr,
+        event_id,
+    )
+
+    # Idempotency: if we already charged successfully, ack and stop
+    if await already_done(payment_done_key(order_id)):
+        logger.info("[%s] idempotent skip — already charged order=%s", WORKER_ID, order_id)
+        return
+
+    channel = await get_channel()
 
     async with SessionLocal() as session:
         result = await session.execute(select(Order).where(Order.id == order_id))
         order = result.scalar_one_or_none()
         if order is None:
-            logger.error("Order %s not found", order_id)
+            logger.error("Order %s not found — parking in DLQ", order_id)
+            await publish_to_dlq(
+                channel, body, reason="order_not_found", source_queue=QUEUE_PAYMENT
+            )
             return
         if order.status == OrderStatus.paid:
-            logger.info("Order %s already paid — skip", order_id)
+            await mark_done(payment_done_key(order_id), event_id)
+            logger.info("Order %s already paid in DB — skip", order_id)
+            return
+        if order.status == OrderStatus.payment_failed:
+            logger.info("Order %s already payment_failed — skip", order_id)
             return
         if order.status != OrderStatus.reserved:
-            logger.warning("Order %s in unexpected status %s", order_id, order.status.value)
+            logger.warning("Order %s unexpected status %s", order_id, order.status.value)
             return
 
-        # Phase 2: payments always succeed. Phase 3 adds flaky failures + retries.
+        try:
+            await _simulate_charge(order_id, payload.get("total_cents", 0))
+        except TransientPaymentError as exc:
+            scheduled = await schedule_retry(channel, message, body, reason=str(exc))
+            if scheduled:
+                # Original message will be acked by message.process(); retry sits in delay queue
+                return
+
+            # Max retries exhausted → mark failed, notify, DLQ
+            order.status = OrderStatus.payment_failed
+            await session.commit()
+            await publish_event(
+                channel,
+                exchange_name=EXCHANGE_TOPIC,
+                routing_key=RK_PAYMENT_FAILED,
+                event_type="payment.failed",
+                order_id=order_id,
+                correlation_id=correlation_id,
+                payload={**payload, "reason": str(exc), "retries": max_retries()},
+            )
+            await publish_to_dlq(
+                channel,
+                {**body, "_headers": dict(message.headers or {})},
+                reason=str(exc),
+                source_queue=QUEUE_PAYMENT,
+            )
+            logger.error(
+                "[%s] payment FAILED permanently order=%s after %s retries",
+                WORKER_ID,
+                order_id,
+                max_retries(),
+            )
+            return
+
         order.status = OrderStatus.paid
         await session.commit()
 
-    channel = await get_channel()
+    await mark_done(payment_done_key(order_id), event_id)
     await publish_event(
         channel,
         exchange_name=EXCHANGE_TOPIC,
@@ -61,7 +148,7 @@ async def handle(body: dict[str, Any], _message: AbstractIncomingMessage) -> Non
         correlation_id=correlation_id,
         payload=payload,
     )
-    logger.info("Charged order=%s total_cents=%s", order_id, payload.get("total_cents"))
+    logger.info("[%s] Charged order=%s total_cents=%s", WORKER_ID, order_id, payload.get("total_cents"))
 
 
 def main() -> None:
