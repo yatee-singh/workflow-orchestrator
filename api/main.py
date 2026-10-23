@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from api.routes import orders
+from api.routes import dashboard, orders
 from shared.config import get_settings
 from shared.db import Base, check_db, engine
 from shared.db_migrate import apply_schema_patches
@@ -51,6 +51,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(orders.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/health")
@@ -76,5 +77,6 @@ async def root() -> dict[str, str]:
         "app": get_settings().app_name,
         "docs": "/docs",
         "health": "/health",
+        "dashboard": "/dashboard",
         "phase": "4 — advanced (RPC/priority/reminders/saga)",
     }

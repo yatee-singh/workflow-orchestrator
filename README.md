@@ -234,9 +234,20 @@ docker compose exec api python -m scripts.seed
 
 | Service | URL |
 |---------|-----|
+| **Dashboard** | http://localhost:8000/dashboard |
 | API docs | http://localhost:8000/docs |
 | Health | http://localhost:8000/health |
 | RabbitMQ Management | http://localhost:15672 (guest / guest) |
+
+## Dashboard
+
+`GET /dashboard` serves a live status board that refreshes every 2s:
+
+- **Order status board** — counts per `pending / reserved / paid / shipped / payment_failed / reservation_failed`; hit **Place demo order** and watch the order hop across columns
+- **Queue table** — ready/unacked depth + consumer count per queue (pulled from the RabbitMQ management API), deepest first; `q.dlq` bars turn red when poison messages pile up
+- **RPC latency** — times a real request-reply round trip to the inventory worker (cached 15s so the probe doesn't churn callback queues)
+
+JSON source: `GET /api/dashboard/summary`.
 
 ## Smoke tests
 
