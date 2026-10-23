@@ -18,6 +18,7 @@ class CreateOrderRequest(BaseModel):
     items: list[OrderItemIn] = Field(min_length=1)
     is_vip: bool = False
     region: str = Field(default="us", min_length=2, max_length=8)
+    priority: int = Field(default=0, ge=0, le=10, description="0=normal, 1-10 higher=sooner")
 
 
 class OrderItemOut(BaseModel):

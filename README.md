@@ -12,7 +12,7 @@ Monorepo layout: one API process + separate worker processes, all talking throug
 | **1 — Core** | Producers/consumers, queues, connections vs channels, manual ack, prefetch |
 | **2 — Routing** | Fanout, direct, topic, headers exchanges + bindings |
 | **3 — Reliability** | Durable queues, persistent messages, publisher confirms, retries, DLQ, idempotency |
-| **4 — Advanced** | RPC, priority queues, delayed messages (TTL+DLX), saga cancel/restock |
+| **4 — Advanced** | RPC (request-reply), priority queues, delayed reminders (TTL+DLX), saga cancel/restock |
 | **5 — Ops** | Admin APIs, DLQ replay, correlation IDs, demo scripts |
 
 ## Architecture (end state)
@@ -63,6 +63,58 @@ docker compose logs -f worker-payment worker-notify
 
 Watch for: `Scheduled retry`, competing `[hostname]` lines, `Dead-lettered`, `payment FAILED`.
 In UI: Queues → `q.delay.1000` / `q.dlq`.
+
+### Phase 4 smoke test (advanced)
+
+Drain all queues for a clean topology (recreate broker):
+
+```bash
+docker compose stop api worker-inventory worker-payment worker-shipping \
+  worker-notify worker-analytics worker-audit
+docker compose up -d --force-recreate rabbitmq
+docker compose up -d --scale worker-payment=2 --build api worker-inventory worker-payment \
+  worker-shipping worker-notify worker-analytics worker-audit
+docker compose exec api python -m scripts.seed
+```
+
+**RPC availability check** — call before you order:
+
+```bash
+curl -s http://localhost:8000/orders/inventory/SKU-TEE-BLK/availability | jq
+```
+
+**Priority ordering** — higher numbers jump the payment queue:
+
+```bash
+curl -s -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_email":"express@example.com","items":[{"sku":"SKU-MUG-WHT","quantity":1}],"priority":8}' | jq
+```
+
+**Delayed reminder** — schedule and wait ~60s for the notify:
+
+```bash
+OID=$(curl -s -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_email":"forgetful@example.com","items":[{"sku":"SKU-HAT-RED","quantity":1}]}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["order"]["id"])')
+echo "order=$OID"
+curl -s -X POST http://localhost:8000/orders/$OID/remind
+sleep 65
+docker compose logs --tail=5 worker-notify
+# look for "REMINDER EMAIL"
+```
+
+**Saga cancel/restock** — set `PAYMENT_FAIL_RATE=1.0` and `MAX_RETRIES=1` in `.env`, then:
+
+```bash
+docker compose up -d --scale worker-payment=2 --force-recreate worker-payment
+OID2=$(curl -s -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_email":"saga@example.com","items":[{"sku":"SKU-TEE-BLK","quantity":2}]}' | jq -r '.order.id')
+sleep 8
+docker compose logs --tail=5 worker-inventory | grep -i 'restock\|cancelled'
+# stock was restored
+```
 
 ## Repo layout
 

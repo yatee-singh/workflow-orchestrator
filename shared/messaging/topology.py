@@ -1,13 +1,10 @@
 """Declare exchanges, queues, and bindings.
 
-Phase 3 adds:
-  - orders.dlx + q.dlq (dead-letter for poison messages)
-  - orders.delay + q.delay.* (TTL → DLX backoff retries)
-  - x-dead-letter-* args on work queues
-
-NOTE: Changing queue arguments requires recreating queues.
-If you see PRECONDITION_FAILED, recreate RabbitMQ:
-  docker compose up -d --force-recreate rabbitmq
+Phase 4 adds:
+  - orders.rpc + q.inventory.rpc (RPC availability check)
+  - x-max-priority on q.payment (express orders jump ahead)
+  - q.reminder (TTL+DLX scheduled reminders)
+  - order.cancelled topic + restock bindings
 """
 
 from __future__ import annotations
@@ -26,6 +23,7 @@ EXCHANGE_TOPIC = "orders.topic"
 EXCHANGE_HEADERS = "orders.headers"
 EXCHANGE_DLX = "orders.dlx"
 EXCHANGE_DELAY = "orders.delay"
+EXCHANGE_RPC = "orders.rpc"
 
 # --- queues ---
 QUEUE_INVENTORY = "q.inventory"
@@ -35,9 +33,12 @@ QUEUE_NOTIFY = "q.notify"
 QUEUE_ANALYTICS = "q.analytics"
 QUEUE_AUDIT = "q.audit"
 QUEUE_DLQ = "q.dlq"
+QUEUE_INVENTORY_RPC = "q.inventory.rpc"
+QUEUE_REMINDER = "q.reminder"
 
 # Delay queues: message sits for TTL ms, then dead-letters back to direct exchange
 DELAY_TTLS_MS = (1_000, 5_000, 25_000)
+REMINDER_TTL_MS = 60_000  # 1 minute demo — set longer in production
 
 # --- routing keys ---
 RK_INVENTORY_RESERVE = "inventory.reserve"
@@ -48,6 +49,9 @@ RK_INVENTORY_FAILED = "inventory.reservation_failed"
 RK_PAYMENT_SUCCEEDED = "payment.succeeded"
 RK_PAYMENT_FAILED = "payment.failed"
 RK_SHIPMENT_CREATED = "shipment.created"
+RK_INVENTORY_AVAILABILITY = "inventory.availability"
+RK_NOTIFY_REMINDER = "notify.reminder"
+RK_ORDER_CANCELLED = "order.cancelled"
 
 
 def delay_queue_name(ttl_ms: int) -> str:
@@ -70,17 +74,23 @@ async def declare_topology(channel: AbstractChannel) -> None:
     headers = await channel.declare_exchange(EXCHANGE_HEADERS, ExchangeType.HEADERS, durable=True)
     dlx = await channel.declare_exchange(EXCHANGE_DLX, ExchangeType.TOPIC, durable=True)
     delay = await channel.declare_exchange(EXCHANGE_DELAY, ExchangeType.DIRECT, durable=True)
+    rpc = await channel.declare_exchange(EXCHANGE_RPC, ExchangeType.DIRECT, durable=True)
 
-    # Dead-letter queue (inspect poison messages here)
+    # Dead-letter queue
     dlq = await channel.declare_queue(QUEUE_DLQ, durable=True)
     await dlq.bind(dlx, routing_key="#")
 
-    # Work queues with DLX on reject/nack(requeue=False) / overflow
+    # Work queues with DLX
     inventory_q = await channel.declare_queue(
         QUEUE_INVENTORY, durable=True, arguments=_dlx_args(QUEUE_INVENTORY)
     )
     payment_q = await channel.declare_queue(
-        QUEUE_PAYMENT, durable=True, arguments=_dlx_args(QUEUE_PAYMENT)
+        QUEUE_PAYMENT,
+        durable=True,
+        arguments={
+            **_dlx_args(QUEUE_PAYMENT),
+            "x-max-priority": 10,  # Phase 4: allow priority ordering
+        },
     )
     shipping_q = await channel.declare_queue(
         QUEUE_SHIPPING, durable=True, arguments=_dlx_args(QUEUE_SHIPPING)
@@ -95,7 +105,23 @@ async def declare_topology(channel: AbstractChannel) -> None:
         QUEUE_AUDIT, durable=True, arguments=_dlx_args(QUEUE_AUDIT)
     )
 
-    # Delay queues: wait TTL, then republish to orders.direct with original RK
+    # RPC queue: reply-to + correlation-id pattern
+    rpc_q = await channel.declare_queue(QUEUE_INVENTORY_RPC, durable=True)
+    await rpc_q.bind(rpc, routing_key=RK_INVENTORY_AVAILABILITY)
+
+    # Reminder queue: message sits for TTL, then DLX → orders.topic with notify.reminder
+    reminder_q = await channel.declare_queue(
+        QUEUE_REMINDER,
+        durable=True,
+        arguments={
+            "x-message-ttl": REMINDER_TTL_MS,
+            "x-dead-letter-exchange": EXCHANGE_DIRECT,
+            "x-dead-letter-routing-key": RK_NOTIFY_REMINDER,
+        },
+    )
+    await reminder_q.bind(delay, routing_key=QUEUE_REMINDER)
+
+    # Delay queues (retry backoff)
     for ttl in DELAY_TTLS_MS:
         q = await channel.declare_queue(
             delay_queue_name(ttl),
@@ -103,9 +129,6 @@ async def declare_topology(channel: AbstractChannel) -> None:
             arguments={
                 "x-message-ttl": ttl,
                 "x-dead-letter-exchange": EXCHANGE_DIRECT,
-                # Default RK overwritten per-message via dead-letter-routing-key in publish...
-                # Queue-level DLX RK: we set per delay queue to payment.charge for Phase 3
-                # (retries are payment-focused). Phase 4 can generalize.
                 "x-dead-letter-routing-key": RK_PAYMENT_CHARGE,
             },
         )
@@ -120,6 +143,7 @@ async def declare_topology(channel: AbstractChannel) -> None:
     await inventory_q.bind(direct, routing_key=RK_INVENTORY_RESERVE)
     await payment_q.bind(direct, routing_key=RK_PAYMENT_CHARGE)
     await shipping_q.bind(direct, routing_key=RK_SHIPPING_CREATE)
+    await notify_q.bind(direct, routing_key=RK_NOTIFY_REMINDER)
 
     # Topic
     await notify_q.bind(topic, routing_key="payment.*")
@@ -129,6 +153,8 @@ async def declare_topology(channel: AbstractChannel) -> None:
     await analytics_q.bind(topic, routing_key="shipment.*")
     await analytics_q.bind(topic, routing_key="inventory.*")
     await shipping_q.bind(topic, routing_key=RK_PAYMENT_SUCCEEDED)
+    # Phase 4: inventory restocks on cancelled
+    await inventory_q.bind(topic, routing_key=RK_ORDER_CANCELLED)
 
     # Headers
     await notify_q.bind(
@@ -136,7 +162,4 @@ async def declare_topology(channel: AbstractChannel) -> None:
         arguments={"x-match": "all", "priority": "high", "region": "eu"},
     )
 
-    logger.info(
-        "Topology ready (phase 3): exchanges + DLQ + delay queues %s",
-        list(DELAY_TTLS_MS),
-    )
+    logger.info("Topology ready (phase 4): RPC, priority, reminders, saga restock")

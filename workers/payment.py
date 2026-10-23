@@ -1,11 +1,7 @@
 """Payment worker — flaky gateway, retries via delay queues, Redis idempotency, DLQ.
 
-Phase 3 concepts:
-- Competing consumers (run 2 replicas) + prefetch=1
-- Simulated payment failures (PAYMENT_FAIL_RATE)
-- Retry with exponential-ish backoff (1s → 5s → 25s) via TTL+DLX
-- After max retries → DLQ + payment.failed event
-- Redis idempotency so a successful charge is never repeated
+Phase 4 addition: on permanent payment failure, also publish `order.cancelled`
+so inventory restocks (saga compensate).
 """
 
 from __future__ import annotations
@@ -28,6 +24,7 @@ from shared.messaging.retry import max_retries, publish_to_dlq, schedule_retry
 from shared.messaging.topology import (
     EXCHANGE_TOPIC,
     QUEUE_PAYMENT,
+    RK_ORDER_CANCELLED,
     RK_PAYMENT_FAILED,
     RK_PAYMENT_SUCCEEDED,
 )
@@ -46,7 +43,6 @@ class TransientPaymentError(Exception):
 
 async def _simulate_charge(order_id: str, total_cents: int) -> None:
     settings = get_settings()
-    # Tiny processing delay so competing consumers are easier to observe
     await asyncio.sleep(0.15)
     if random.random() < settings.payment_fail_rate:
         raise TransientPaymentError(
@@ -74,7 +70,6 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
         event_id,
     )
 
-    # Idempotency: if we already charged successfully, ack and stop
     if await already_done(payment_done_key(order_id)):
         logger.info("[%s] idempotent skip — already charged order=%s", WORKER_ID, order_id)
         return
@@ -106,12 +101,12 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
         except TransientPaymentError as exc:
             scheduled = await schedule_retry(channel, message, body, reason=str(exc))
             if scheduled:
-                # Original message will be acked by message.process(); retry sits in delay queue
                 return
 
-            # Max retries exhausted → mark failed, notify, DLQ
+            # Max retries exhausted → saga compensate: order.cancelled → restock
             order.status = OrderStatus.payment_failed
             await session.commit()
+
             await publish_event(
                 channel,
                 exchange_name=EXCHANGE_TOPIC,
@@ -121,6 +116,16 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
                 correlation_id=correlation_id,
                 payload={**payload, "reason": str(exc), "retries": max_retries()},
             )
+            # Phase 4: emit order.cancelled so inventory restocks
+            await publish_event(
+                channel,
+                exchange_name=EXCHANGE_TOPIC,
+                routing_key=RK_ORDER_CANCELLED,
+                event_type=RK_ORDER_CANCELLED,
+                order_id=order_id,
+                correlation_id=correlation_id,
+                payload=payload,
+            )
             await publish_to_dlq(
                 channel,
                 {**body, "_headers": dict(message.headers or {})},
@@ -128,10 +133,9 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
                 source_queue=QUEUE_PAYMENT,
             )
             logger.error(
-                "[%s] payment FAILED permanently order=%s after %s retries",
+                "[%s] payment FAILED permanently order=%s — saga cancel emitted",
                 WORKER_ID,
                 order_id,
-                max_retries(),
             )
             return
 

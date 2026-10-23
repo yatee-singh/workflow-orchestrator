@@ -1,4 +1,4 @@
-"""Notify worker — topic (payment.*/shipment.*) + headers VIP alerts. Stubs email/SMS."""
+"""Notify worker — topic (payment.*/shipment.*) + headers VIP alerts + delayed reminders."""
 
 from __future__ import annotations
 
@@ -50,6 +50,14 @@ async def handle(body: dict[str, Any], message: AbstractIncomingMessage) -> None
         )
     elif event_type == "inventory.reservation_failed":
         logger.info("EMAIL to %s: out of stock for order %s", email, order_id)
+    elif event_type == "notify.reminder":
+        logger.info(
+            "REMINDER EMAIL to %s: you have an order %s still pending!",
+            email,
+            order_id,
+        )
+    elif event_type == "order.cancelled":
+        logger.info("EMAIL to %s: order %s was cancelled", email, order_id)
     else:
         logger.info("Notify ignoring %s", event_type)
 

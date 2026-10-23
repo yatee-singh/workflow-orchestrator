@@ -23,15 +23,8 @@ logging.basicConfig(level=get_settings().log_level)
 MessageHandler = Callable[[dict[str, Any], AbstractIncomingMessage], Awaitable[None]]
 
 
-async def run_queue_worker(
-    worker_name: str,
-    queue_name: str,
-    handler: MessageHandler,
-    *,
-    prefetch: int = 10,
-    init_db: bool = True,
-) -> None:
-    logger = logging.getLogger(worker_name)
+def make_stop_event() -> asyncio.Event:
+    """Create a stop event and wire SIGINT/SIGTERM to set it."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -39,6 +32,29 @@ async def run_queue_worker(
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
             pass
+    return stop
+
+
+async def run_queue_worker(
+    worker_name: str,
+    queue_name: str,
+    handler: MessageHandler,
+    *,
+    prefetch: int = 10,
+    init_db: bool = True,
+    stop: asyncio.Event | None = None,
+    close_rmq_on_stop: bool = True,
+) -> None:
+    """
+    Bootstrap a consumer: connect, declare topology, consume until stop, clean up.
+
+    If *stop* is None a new Event is created with signal handlers.
+    Pass a shared stop event to run multiple workers in one process.
+    Set *close_rmq_on_stop* = False for all but the last worker sharing a connection.
+    """
+    logger = logging.getLogger(worker_name)
+    if stop is None:
+        stop = make_stop_event()
 
     if init_db:
         async with engine.begin() as conn:
@@ -68,4 +84,5 @@ async def run_queue_worker(
     await stop.wait()
     logger.info("Shutting down %s...", worker_name)
     await queue.cancel(consumer_tag)
-    await close_connection()
+    if close_rmq_on_stop:
+        await close_connection()
